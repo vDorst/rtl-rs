@@ -18,29 +18,48 @@ pub struct Rtl837x<'bus, I> {
 }
 
 impl<'bus, I2C: I2c> Rtl837x<'bus, I2C> {
-    pub fn new(i2cbus: &'bus mut I2C, addr: u8) -> Result<Self, I2C::Error> {
-        // let mut id = [0;4];
-        // i2cbus.write_read(addr, &regs::Regs::ChipID.as_slice(), id.as_mut_slice())?;
-        // let id = u32::from_le_bytes(id);
-        // if id != 0x83720000 {
-        //     return Err(Error::UnknownChipID(id));
-        // }
-        Ok(Self { i2c: i2cbus, addr})
+    pub fn new(i2cbus: &'bus mut I2C, addr: u8) -> Self {
+        Self { i2c: i2cbus, addr }
     }
 
     pub fn read_reg(&mut self, reg: Regs) -> Result<u32, I2C::Error> {
-        let mut val = [0;4];
-        self.i2c.write_read(self.addr, &reg.as_slice(), val.as_mut_slice())?;
+        let mut val = [0; 4];
+        self.i2c
+            .write_read(self.addr, &reg.as_slice(), val.as_mut_slice())?;
         Ok(u32::from_le_bytes(val))
     }
 
     pub fn write_reg(&mut self, reg: Regs, value: u32) -> Result<(), I2C::Error> {
         let mut val = [0; 6];
         val[0..2].copy_from_slice(&reg.as_slice());
-        val[2..4].copy_from_slice(&value.to_le_bytes());
+        val[2..6].copy_from_slice(&value.to_le_bytes());
 
         self.i2c.write(self.addr, &val)?;
         Ok(())
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use embedded_hal_mock::eh1::i2c::{Mock as I2cMock, Transaction as I2cTransaction};
+
+    #[test]
+    fn transaction() {
+        let expect = vec![
+            I2cTransaction::write_read(0x5c, vec![0xAB, 0xCD], vec![0x78, 0x56, 0x34, 0x12]),
+            I2cTransaction::write(0x5c, vec![0xAB, 0xCD, 0x78, 0x56, 0x34, 0x12]),
+        ];
+
+        let mut i2cbus_mock = I2cMock::new(&expect);
+
+        let mut rtl = Rtl837x::new(&mut i2cbus_mock, 0x5c);
+
+        let val = rtl.read_reg(Regs::TestReg);
+        assert_eq!(val, Ok(0x12345678));
+
+        assert!(rtl.write_reg(Regs::TestReg, 0x12345678).is_ok());
+
+        i2cbus_mock.done();
+    }
+}

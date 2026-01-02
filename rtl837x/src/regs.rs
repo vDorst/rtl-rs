@@ -2,6 +2,8 @@
 #[repr(u16)]
 pub enum Regs {
     ChipID = 0x0004,
+    #[cfg(test)]
+    TestReg = 0xABCD,
 }
 
 impl Regs {
