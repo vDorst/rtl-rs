@@ -1,0 +1,9 @@
+[package]
+name = "rtl837x-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# i2cdev = "0.6.2"
+rtl837x = {path = "../rtl837x" }
+linux-embedded-hal = { version = "0.4", default-features = false, features = ["i2c"] }
