@@ -22,16 +22,16 @@ impl<'bus, I2C: I2c> Rtl837x<'bus, I2C> {
         Self { i2c: i2cbus, addr }
     }
 
-    pub fn read_reg(&mut self, reg: Regs) -> Result<u32, I2C::Error> {
+    pub fn read_reg(&mut self, reg: u16) -> Result<u32, I2C::Error> {
         let mut val = [0; 4];
         self.i2c
-            .write_read(self.addr, &reg.as_slice(), val.as_mut_slice())?;
+            .write_read(self.addr, reg.to_be_bytes().as_slice(), val.as_mut_slice())?;
         Ok(u32::from_le_bytes(val))
     }
 
-    pub fn write_reg(&mut self, reg: Regs, value: u32) -> Result<(), I2C::Error> {
+    pub fn write_reg(&mut self, reg: u16, value: u32) -> Result<(), I2C::Error> {
         let mut val = [0; 6];
-        val[0..2].copy_from_slice(&reg.as_slice());
+        val[0..2].copy_from_slice(reg.to_be_bytes().as_slice());
         val[2..6].copy_from_slice(&value.to_le_bytes());
 
         self.i2c.write(self.addr, &val)?;
@@ -55,10 +55,10 @@ mod tests {
 
         let mut rtl = Rtl837x::new(&mut i2cbus_mock, 0x5c);
 
-        let val = rtl.read_reg(Regs::TestReg);
+        let val = rtl.read_reg(Regs::TestReg.into());
         assert_eq!(val, Ok(0x12345678));
 
-        assert!(rtl.write_reg(Regs::TestReg, 0x12345678).is_ok());
+        assert!(rtl.write_reg(Regs::TestReg.into(), 0x12345678).is_ok());
 
         i2cbus_mock.done();
     }
