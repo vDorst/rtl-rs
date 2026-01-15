@@ -38,6 +38,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     }
     // }
 
+    // let mut val = rtldev.read_reg(0x65d8).unwrap();
+    // val &= !(1 << 9);
+    // // val &= !(1 << 24);
+    // val |= 1 << 24;
+    // val &= !(3 << 13);
+    // val |= 3 << 13;
+    // rtldev.write_reg(0x65d8, val).unwrap();
+
+    // let new = rtldev.read_reg(0x65d8).unwrap();
+    // if val != new {
+    //     println!("No value change! {val:08x} != {new:08x}")
+    // }
+
     struct Reg {
         name: &'static str,
         addr: u16,
@@ -109,6 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Reg::new("LED_LOAD_LV2_10M", 0x65CC),
         Reg::new("LED_LOAD_LV3_10M", 0x65D0),
         Reg::new("LED_P_LOAD_CTRL", 0x65D4),
+        Reg::new("LED_DUMY_0_ADDR", 0x6604),
+        Reg::new("LED_DUMY_1_ADDR", 0x6608),
     ];
 
     for Reg { name, addr } in regs {
@@ -133,6 +148,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     val >>= 6;
                 }
             }
+            0x654c => {
+                for port in 0..=8 {
+                    println!("\tport{port} PSEL: {}", (val >> (port << 1)) & 0x3);
+                }
+            }
+            0x6524..=0x6528 => {
+                for set in 0..2 {
+                    for led in 0..4 {
+                        println!(
+                            "\tSET{} LED{led}: {:x}",
+                            set + (u16::from(addr == 0x6524) << 1),
+                            val & 0x0F
+                        );
+                        val >>= 4;
+                    }
+                }
+            }
+
             //RTL8373_LED_GLB_ACTIVE_ADDR
             0x65d8 => {
                 for led in 0..=29 {
@@ -178,6 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\tPWR ON BLINK SEL: {:x}", (val >> 3) & 0x3);
                 println!("\tSTP1_PWR_ON_LED: {:x}", (val >> 5) & 0xF);
                 println!("\tSTP2_PWR_ON_LED: {:x}", (val >> 9) & 0xF);
+                println!("\tFIB_UNIDIR_LED_EN: {:x}", (val >> 14) & 0x1);
                 println!("\tSYS_LED_EN: {:x}", (val >> 15) & 0x1);
                 println!("\tSYS_LED_MODE: {:x}", (val >> 16) & 0x3);
             }
