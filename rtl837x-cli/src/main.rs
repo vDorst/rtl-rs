@@ -3,6 +3,128 @@ use std::time::Duration;
 
 use rtl837x::Regs;
 
+use crossterm::{
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, MouseButton,
+        MouseEvent, MouseEventKind,
+    },
+    execute,
+    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    widgets::{Block, Borders, List, ListItem, ListState},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::from_reader;
+use std::fs::File;
+use std::io::{self, Write};
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Register {
+    name: String,
+    address: u16,
+    value: u32,
+}
+
+struct App {
+    registers: Vec<Register>,
+    selected: ListState,
+}
+
+impl App {
+    fn new(registers: Vec<Register>) -> Self {
+        Self {
+            registers,
+            selected: ListState::default(),
+        }
+    }
+
+    fn toggle_bit(&mut self, bit: usize) {
+        if let Some(register) = self
+            .registers
+            .get_mut(self.selected.selected().unwrap_or(0))
+        {
+            register.value ^= 1 << bit; // Toggle the specified bit
+        }
+    }
+
+    fn run(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+        loop {
+            terminal.draw(|f| {
+                let size = f.area();
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .margin(1)
+                    .constraints([Constraint::Percentage(100)].as_ref())
+                    .split(size);
+
+                let items: Vec<ListItem> = self
+                    .registers
+                    .iter()
+                    .map(|r| {
+                        ListItem::new(format!(
+                            "{}: {:04x} = {:08x} {:032b}",
+                            r.name, r.address, r.value, r.value
+                        ))
+                    })
+                    .collect();
+
+                let list = List::new(items)
+                    .block(Block::default().title("Registers").borders(Borders::ALL))
+                    .highlight_style(
+                        ratatui::style::Style::default().bg(ratatui::style::Color::Yellow),
+                    );
+
+                f.render_stateful_widget(list, chunks[0], &mut self.selected); // use &mut self.selected
+            })?;
+
+            if event::poll(std::time::Duration::from_millis(10))? {
+                if let Event::Mouse(mouse_event) = event::read()? {
+                    if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
+                        let bit = (mouse_event.column as usize) % 32; // Assuming a fixed width layout for bits
+                        self.toggle_bit(bit);
+                    }
+                } else if let Event::Key(KeyEvent { code, .. }) = event::read()? {
+                    match code {
+                        KeyCode::Up => {
+                            self.selected.select_next();
+                        }
+                        KeyCode::Down => {
+                            self.selected.select_previous();
+                        }
+                        KeyCode::Esc => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// fn main() -> Result<(), Box<dyn std::error::Error>> {
+//     let file = File::open("registers.json")?;
+//     let registers: Vec<Register> = from_reader(file)?;
+
+//     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+//     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+//     execute!(std::io::stdout(), EnableMouseCapture)?;
+//     terminal.clear()?;
+
+//     let mut app = App::new(registers);
+
+//     app.run(&mut terminal)?;
+
+//     execute!(std::io::stdout(), DisableMouseCapture)?;
+//     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+//     terminal.show_cursor()?;
+
+//     Ok(())
+// }
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = "/dev/i2c-7";
     let mut bus = match linux_embedded_hal::I2cdev::new(path) {
@@ -15,9 +137,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut rtldev = rtl837x::Rtl837x::new(&mut bus, SLAVE_ADDR);
 
-    let chip_id = rtldev.read_reg(Regs::ChipID.into())?;
+    let soc = rtldev.get_chip_id()?;
+    println!("SOC: {soc:?}");
 
-    println!("Chip ID: {:08x?}", chip_id);
+    let soc = rtldev.get_soc_version()?;
+    println!("SOC_REVISION: {soc:03x}");
+    let soc = rtldev.get_soc_version()?;
+    println!("SOC_REVISION: {soc:03x}");
 
     // for (idx, &reg) in [Regs::IoMuxSel0, Regs::IoMuxSel1, Regs::IoMuxSel2]
     //     .iter()
@@ -126,112 +252,112 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Reg::new("LED_DUMY_1_ADDR", 0x6608),
     ];
 
-    for Reg { name, addr } in regs {
-        let Ok(mut val) = rtldev.read_reg(addr.into()) else {
-            println!("[{addr:04x}] Error");
-            continue;
-        };
-        println!(
-            "[{addr:04x}] {name:40}: {:08x} {:032b} 1's {}",
-            val,
-            val,
-            val.count_ones()
-        );
-        match addr {
-            0x65e0..=0x65F4 => {
-                // RTL8373_LED_GLB_MUX_1_ADDR
-                let led_offset = ((addr - 0x65e0) >> 2) * 5;
-                let n = if addr == 0x65F4 { 2 } else { 4 };
-                for led in 0..=n {
-                    let led = led + led_offset;
-                    println!("\tLed{led:2}: {:02x}", val & 0x3f);
-                    val >>= 6;
-                }
-            }
-            0x654c => {
-                for port in 0..=8 {
-                    println!("\tport{port} PSEL: {}", (val >> (port << 1)) & 0x3);
-                }
-            }
-            0x6524..=0x6528 => {
-                for set in 0..2 {
-                    for led in 0..4 {
-                        println!(
-                            "\tSET{} LED{led}: {:x}",
-                            set + (u16::from(addr == 0x6524) << 1),
-                            val & 0x0F
-                        );
-                        val >>= 4;
-                    }
-                }
-            }
+    // for Reg { name, addr } in regs {
+    //     let Ok(mut val) = rtldev.read_reg(addr.into()) else {
+    //         println!("[{addr:04x}] Error");
+    //         continue;
+    //     };
+    //     println!(
+    //         "[{addr:04x}] {name:40}: {:08x} {:032b} 1's {}",
+    //         val,
+    //         val,
+    //         val.count_ones()
+    //     );
+    //     match addr {
+    //         0x65e0..=0x65F4 => {
+    //             // RTL8373_LED_GLB_MUX_1_ADDR
+    //             let led_offset = ((addr - 0x65e0) >> 2) * 5;
+    //             let n = if addr == 0x65F4 { 2 } else { 4 };
+    //             for led in 0..=n {
+    //                 let led = led + led_offset;
+    //                 println!("\tLed{led:2}: {:02x}", val & 0x3f);
+    //                 val >>= 6;
+    //             }
+    //         }
+    //         0x654c => {
+    //             for port in 0..=8 {
+    //                 println!("\tport{port} PSEL: {}", (val >> (port << 1)) & 0x3);
+    //             }
+    //         }
+    //         0x6524..=0x6528 => {
+    //             for set in 0..2 {
+    //                 for led in 0..4 {
+    //                     println!(
+    //                         "\tSET{} LED{led}: {:x}",
+    //                         set + (u16::from(addr == 0x6524) << 1),
+    //                         val & 0x0F
+    //                     );
+    //                     val >>= 4;
+    //                 }
+    //             }
+    //         }
 
-            //RTL8373_LED_GLB_ACTIVE_ADDR
-            0x65d8 => {
-                for led in 0..=29 {
-                    println!(
-                        "\tLed{led:2}: Active {}",
-                        if val & (1 << led) != 0 { "Low" } else { "High" }
-                    );
-                }
-            }
-            // RTL8373_LED_GLB_IO_EN_ADDR
-            0x65dc => {
-                for led in 0..=29 {
-                    println!(
-                        "\tLed{led:2}: {}",
-                        if val & (1 << led) != 0 { "On" } else { "Off" }
-                    );
-                }
-                println!(
-                    "\tLed Pad:  {}",
-                    if val & (1 << 30) != 0 { "On" } else { "Off" }
-                );
-            }
+    //         //RTL8373_LED_GLB_ACTIVE_ADDR
+    //         0x65d8 => {
+    //             for led in 0..=29 {
+    //                 println!(
+    //                     "\tLed{led:2}: Active {}",
+    //                     if val & (1 << led) != 0 { "Low" } else { "High" }
+    //                 );
+    //             }
+    //         }
+    //         // RTL8373_LED_GLB_IO_EN_ADDR
+    //         0x65dc => {
+    //             for led in 0..=29 {
+    //                 println!(
+    //                     "\tLed{led:2}: {}",
+    //                     if val & (1 << led) != 0 { "On" } else { "Off" }
+    //                 );
+    //             }
+    //             println!(
+    //                 "\tLed Pad:  {}",
+    //                 if val & (1 << 30) != 0 { "On" } else { "Off" }
+    //             );
+    //         }
 
-            // RTL8373_IO_MUX_SEL_0_ADDR
-            0x7F8C => {
-                for led in 0..=27 {
-                    println!(
-                        "\tLed{led:2}: MUX SEL: {}",
-                        if val & (1 << led) != 0 { "LED" } else { "GPIO" }
-                    );
-                }
-                println!(
-                    "\tSYS LED:  {}",
-                    if val & (1 << 28) != 0 { "Alt" } else { "GPIO" }
-                );
-                println!(
-                    "\tRLDP_LED:  {}",
-                    if val & (1 << 29) != 0 { "Alt" } else { "GPIO" }
-                );
-            }
-            //RTL8373_LED_GLB_CTRL_ADDR
-            0x6520 => {
-                println!("\tPWR ON BLINK SEL: {:x}", (val >> 3) & 0x3);
-                println!("\tSTP1_PWR_ON_LED: {:x}", (val >> 5) & 0xF);
-                println!("\tSTP2_PWR_ON_LED: {:x}", (val >> 9) & 0xF);
-                println!("\tFIB_UNIDIR_LED_EN: {:x}", (val >> 14) & 0x1);
-                println!("\tSYS_LED_EN: {:x}", (val >> 15) & 0x1);
-                println!("\tSYS_LED_MODE: {:x}", (val >> 16) & 0x3);
-            }
-            0x652C..=0x6548 => {
-                println!("\tL: {:04x}", (val) & 0xFFFF);
-                println!("\tM: {:04x}", (val >> 16) & 0xFFFF);
-            }
+    //         // RTL8373_IO_MUX_SEL_0_ADDR
+    //         0x7F8C => {
+    //             for led in 0..=27 {
+    //                 println!(
+    //                     "\tLed{led:2}: MUX SEL: {}",
+    //                     if val & (1 << led) != 0 { "LED" } else { "GPIO" }
+    //                 );
+    //             }
+    //             println!(
+    //                 "\tSYS LED:  {}",
+    //                 if val & (1 << 28) != 0 { "Alt" } else { "GPIO" }
+    //             );
+    //             println!(
+    //                 "\tRLDP_LED:  {}",
+    //                 if val & (1 << 29) != 0 { "Alt" } else { "GPIO" }
+    //             );
+    //         }
+    //         //RTL8373_LED_GLB_CTRL_ADDR
+    //         0x6520 => {
+    //             println!("\tPWR ON BLINK SEL: {:x}", (val >> 3) & 0x3);
+    //             println!("\tSTP1_PWR_ON_LED: {:x}", (val >> 5) & 0xF);
+    //             println!("\tSTP2_PWR_ON_LED: {:x}", (val >> 9) & 0xF);
+    //             println!("\tFIB_UNIDIR_LED_EN: {:x}", (val >> 14) & 0x1);
+    //             println!("\tSYS_LED_EN: {:x}", (val >> 15) & 0x1);
+    //             println!("\tSYS_LED_MODE: {:x}", (val >> 16) & 0x3);
+    //         }
+    //         0x652C..=0x6548 => {
+    //             println!("\tL: {:04x}", (val) & 0xFFFF);
+    //             println!("\tM: {:04x}", (val >> 16) & 0xFFFF);
+    //         }
 
-            _ => (),
-        }
-    }
+    //         _ => (),
+    //     }
+    // }
 
-    // Enable SYS_LED
-    let mut val = rtldev.read_reg(0x6520).unwrap();
-    val |= 1 << 15;
-    rtldev.write_reg(0x6520, val).unwrap();
+    // // Enable SYS_LED
+    // let mut val = rtldev.read_reg(0x6520).unwrap();
+    // val |= 1 << 15;
+    // rtldev.write_reg(0x6520, val).unwrap();
 
-    let mut val = rtldev.read_reg(0x7f8c).unwrap();
-    val |= 1 << 28;
-    rtldev.write_reg(0x7f8c, val).unwrap();
+    // let mut val = rtldev.read_reg(0x7f8c).unwrap();
+    // val |= 1 << 28;
+    // rtldev.write_reg(0x7f8c, val).unwrap();
 
     // Set Led mode
 
@@ -249,6 +375,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     rtldev.write_reg(0x6520, val).unwrap();
     //     std::thread::sleep(Duration::from_secs(4));
     // }
+
+    match rtldev.get_i2c_gpio_pin_group() {
+        Ok((sda, scl)) => println!("I2c group sda={sda}, scl={scl}"),
+        Err(err) => println!("Error: {err:?}"),
+    }
+
+    match rtldev.rtl8224_reg_read(0x04) {
+        Ok(val) => println!("Chip ID: {val:04x}"),
+        Err(err) => println!("Error: {err:?}"),
+    }
+
+    // let reg: u16 = 0x1210;
+    // match rtldev.rtl8224_reg_read(reg) {
+    //     Ok(val) => println!("{reg:04x}: {val:04x}"),
+    //     Err(err) => println!("Error: {err:?}"),
+    // }
+
+    // rtldev.rtl8224_reg_write(reg, 0xAAAA5555).unwrap();
+
+    // match rtldev.rtl8224_reg_read(reg) {
+    //     Ok(val) => println!("{reg:04x}: {val:04x}"),
+    //     Err(err) => println!("Error: {err:?}"),
+    // }
+
+    // rtldev.rtl8224_reg_write(reg, 0x5555AAAA).unwrap();
+
+    // match rtldev.rtl8224_reg_read(reg) {
+    //     Ok(val) => println!("{reg:04x}: {val:04x}"),
+    //     Err(err) => println!("Error: {err:?}"),
+    //}
+
+    //dal_rtl8224_sds_regbits_write(0, 6, 2, 0x2000, 1); //##S0RX PN swap for 64B/66B
+
+    for _ in 0..100 {
+        let mut val = rtldev.rtl8224_sds_reg_read(0, 6, 2).unwrap();
+        println!("SDS: {val:04x}");
+        if val == 0xe45c {
+            continue;
+        }
+        val |= 0x2000;
+        rtldev.rtl8224_sds_reg_write(0, 6, 2, val).unwrap();
+
+        let val2 = rtldev.rtl8224_sds_reg_read(0, 6, 2).unwrap();
+        if val != val2 {
+            println!("SDS: {val:04x}");
+            // break;
+        }
+    }
 
     Ok(())
 }
