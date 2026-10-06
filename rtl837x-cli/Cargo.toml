@@ -1,9 +1,15 @@
 [package]
 name = "rtl837x-cli"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
 # i2cdev = "0.6.2"
-rtl837x = {path = "../rtl837x" }
-linux-embedded-hal = { version = "0.4", default-features = false, features = ["i2c"] }
+rtl837x = { path = "../rtl837x" }
+linux-embedded-hal = { version = "0.5.0", default-features = false, features = [
+    "i2c",
+] }
+ratatui = "0.30.0"
+serde_json = { version = "1.0.151" }
+serde = { version = "1.0.229", features = ["derive"] }
+crossterm = "0.29.0"

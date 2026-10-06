@@ -1,7 +1,9 @@
+mod i2c;
 mod regs;
 
 use embedded_hal::i2c::I2c;
 
+pub use crate::i2c::{I2C_SCL, I2C_SDA};
 pub use crate::regs::Regs;
 
 #[derive(thiserror::Error, Debug)]
@@ -14,6 +16,10 @@ pub enum Error<I> {
     UserMask(u32),
     #[error("SMI Access TimeOut")]
     PhyAccessTimeOut,
+    #[error("Function Input invalid")]
+    InvalidInput,
+    #[error("I2C Nack")]
+    I2CNack,
 }
 
 pub struct Rtl837x<'bus, I> {
@@ -247,37 +253,41 @@ impl<'bus, I2C: I2c> Rtl837x<'bus, I2C> {
         }
 
         // RTL8373_SDS_INDACS_WD_ADDR
+        println!("WRITE: SdsIndacsWd: {regdata:04x}");
         self.rtl8224_reg_write(Regs::SdsIndacsWd.into(), regdata)?;
 
         // RTL8373_SDS_INDACS_CMD_SDS_INDEX_OFFSET
         let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
+        println!("WRITE: SdsIndacsCmd: {val:04x}");
+        val = 0;
         if sds_index & 0x01 != 0 {
             val |= 1;
         } else {
             val &= !1;
         }
-        self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
+        // self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
 
         // RTL8373_SDS_INDACS_CMD_SDS_PAGE_MASK
-        let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
+        // let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
         val &= !(0x3F << 1);
         val |= u32::from(sds_page & 0x3f) << 1;
-        self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
+        // self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
 
         // RTL8373_SDS_INDACS_CMD_SDS_REGAD_MASK
-        let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
+        // let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
         val &= !(0x1F << 7);
         val |= u32::from(sds_reg & 0x1f) << 7;
-        self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
+        // self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
 
         // RTL8373_SDS_INDACS_CMD_SDS_RWOP_OFFSET
-        let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
+        // let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
         val |= 1 << 14;
-        self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
+        // self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
 
         // RTL8373_SDS_INDACS_CMD_SDS_CMD_OFFSET
-        let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
+        // let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
         val |= 1 << 15;
+        println!("WRITE: SdsIndacsCmd: {val:04x}");
         self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
 
         let mut cnt = 100;
@@ -316,13 +326,14 @@ impl<'bus, I2C: I2c> Rtl837x<'bus, I2C> {
         //   #define RTL8373_SDS_INDACS_CMD_SDS_INDEX_OFFSET                                                             (0)
         //   #define RTL8373_SDS_INDACS_CMD_SDS_INDEX_MASK
         //  (0x1 << RTL8373_SDS_INDACS_CMD_SDS_INDEX_OFFSET)
-        let mut val = 0;
+        let mut val;
         let mut cnt = 100;
         loop {
             val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
 
             // RTL8373_SDS_INDACS_CMD_SDS_CMD_OFFSET
             if val & (1 << 15) == 0 {
+                println!("SdsIndacsCmd: {val:04x}");
                 // Success
                 break;
             }
@@ -334,32 +345,28 @@ impl<'bus, I2C: I2c> Rtl837x<'bus, I2C> {
         }
 
         // RTL8373_SDS_INDACS_CMD_SDS_INDEX_OFFSET
-        if sds_index & 0x01 != 0 {
-            val |= 1;
-        } else {
-            val &= !1;
-        }
-        self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
+        val = u32::from(sds_index & 0x01);
+        // self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
 
         // RTL8373_SDS_INDACS_CMD_SDS_PAGE_MASK
-        let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
-        val &= !(0x3F << 1);
+        // let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
+        // val &= !(0x3F << 1);
         val |= u32::from(sds_page & 0x3f) << 1;
-        self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
+        // self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
 
         // RTL8373_SDS_INDACS_CMD_SDS_REGAD_MASK
-        let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
-        val &= !(0x1F << 7);
+        // let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
+        // val &= !(0x1F << 7);
         val |= u32::from(sds_reg & 0x1f) << 7;
-        self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
+        // self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
 
         // RTL8373_SDS_INDACS_CMD_SDS_RWOP_OFFSET
-        let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
+        // let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
         val &= !(1 << 14);
-        self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
+        // self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
 
         // RTL8373_SDS_INDACS_CMD_SDS_CMD_OFFSET
-        let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
+        // let mut val = self.rtl8224_reg_read(Regs::SdsIndacsCmd.into())?;
         val |= 1 << 15;
         self.rtl8224_reg_write(Regs::SdsIndacsCmd.into(), val)?;
 
@@ -382,6 +389,95 @@ impl<'bus, I2C: I2c> Rtl837x<'bus, I2C> {
 
         self.rtl8224_reg_read(Regs::SdsIndacsRd.into())
     }
+
+    pub fn i2c_read(
+        &mut self,
+        scl: I2C_SCL,
+        sda: I2C_SDA,
+        dev: u8,
+        addr: Addr,
+        data: &mut [u8],
+    ) -> Result<(), Error<I2C::Error>> {
+        let (addr_data, addr_len) = match addr {
+            Addr::None => (0x0, 0 << 20),
+            Addr::One(v) => (u32::from(v), 1 << 20),
+            Addr::Two(v) => (u32::from(u16::from_be_bytes(v)), 2 << 20),
+            Addr::Three(v) => (
+                u32::from(v[2]) << 16 | u32::from(v[1]) << 8 | u32::from(v[0]),
+                3 << 20,
+            ),
+        };
+
+        // println!("addr_data: {addr_data:08x}");
+        self.write_reg(Regs::I2cAddrData.into(), addr_data)
+            .map_err(|_err| Error::PhyAccessTimeOut)?;
+
+        let Some(len) = u32::try_from(data.len())
+            .ok()
+            .map(|val| {
+                if val == 0 || val > 16 {
+                    None
+                } else {
+                    Some(val - 1)
+                }
+            })
+            .map(|val| val.unwrap())
+        else {
+            return Err(Error::InvalidInput);
+        };
+
+        // #define RTL837X_REG_I2C_SCL_SHIFT 5
+        // #define RTL837X_REG_I2C_SDA_SHIFT 2
+        // 	.sds_settings[0].sds_settings_t.sfp.i2c = I2CBUS( GPIO41_I2C_SDA3_MDIO1, GPIO40_I2C_SCL3_MDC1 ), /* GPIO 40 */
+        //  3 << 2 | 3 << 5
+        // .sds_settings[1].sds_settings_t.sfp.i2c = I2CBUS( GPIO39_I2C_SDA4, GPIO40_I2C_SCL3_MDC1 )
+        //  4 << 2 | 3 << 5
+
+        let mut val = addr_len;
+        val |= len << 16;
+        val |= scl as u32;
+        val |= sda as u32;
+        val |= u32::from(dev) << 3;
+        val |= 0x1;
+        // println!("data: {data:08x}");
+
+        // data = 0x001f6e89;
+        self.write_reg(Regs::I2cMst1Ctrl1.into(), val)
+            .map_err(|err| Error::PhyAccessTimeOut)?;
+
+        let mut value: u32;
+        loop {
+            value = self
+                .read_reg(Regs::I2cMst1Ctrl1.into())
+                .map_err(|err| Error::PhyAccessTimeOut)?;
+            // println!("value: {value:08x}");
+            if value & 0x1 == 0 {
+                break;
+            }
+        }
+        if value & 0x2 != 0 {
+            return Err(Error::I2CNack);
+        }
+
+        for (idx, d) in data.chunks_mut(4).enumerate() {
+            value = self
+                .read_reg(Regs::I2cData as u16 + (idx * 4) as u16)
+                .map_err(|_err| Error::PhyAccessTimeOut)?;
+            let len = d.len();
+            // println!("idx: {idx}, value = {value:08x}, d = {len}");
+
+            d[0..len].copy_from_slice(&value.to_le_bytes()[0..len]);
+        }
+
+        Ok(())
+    }
+}
+
+pub enum Addr {
+    None,
+    One(u8),
+    Two([u8; 2]),
+    Three([u8; 3]),
 }
 
 #[derive(Debug, Clone, Copy)]
