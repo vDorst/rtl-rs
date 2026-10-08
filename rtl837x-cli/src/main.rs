@@ -1,7 +1,8 @@
 const SLAVE_ADDR: u8 = 0x5c;
-use std::time::Duration;
+use std::{thread::sleep, time::Duration};
 
-use rtl837x::{I2C_SCL, I2C_SDA, Regs};
+use embedded_hal::i2c::I2c;
+use rtl837x::{Error, I2C_SCL, I2C_SDA, Regs, Rtl837x, phy_modify, phy_read, phy_write};
 
 use crossterm::{
     event::{
@@ -136,6 +137,420 @@ impl Reg {
     }
 }
 
+fn marvell_config_aneg<'bus, I2C: I2c>(
+    dev: &mut Rtl837x<'bus, I2C>,
+) -> Result<(), Error<I2C::Error>> {
+    genphy_restart_aneg(dev)?;
+
+    genphy_soft_reset(dev)
+}
+
+const BMCR_ANRESTART: u16 = 0x200;
+const BMCR_ISOLATE: u16 = 0x400;
+const BMCR_ANENABLE: u16 = 0x1000;
+const BMCR_RESET: u16 = 0x8000;
+
+const MII_MARVELL_PHY_PAGE: u8 = 22;
+
+fn genphy_soft_reset<'bus, I2C: I2c>(
+    dev: &mut Rtl837x<'bus, I2C>,
+) -> Result<(), Error<I2C::Error>> {
+    phy_modify(dev, 0x00, BMCR_ISOLATE, BMCR_RESET | BMCR_ANRESTART)
+}
+
+fn genphy_restart_aneg<'bus, I2C: I2c>(
+    dev: &mut Rtl837x<'bus, I2C>,
+) -> Result<(), Error<I2C::Error>> {
+    let reg = 0x00;
+    phy_write(dev, reg, 0x00)?;
+    let mut val = phy_read(dev, reg)?;
+    println!("Reg: {reg:02x} = {:04x}", val);
+    if (val & BMCR_ANENABLE) == 0 {
+        val &= !BMCR_ISOLATE;
+        val |= BMCR_ANRESTART | BMCR_ANENABLE;
+        println!("Write {val:04x}");
+        phy_write(dev, reg, val)?;
+    }
+
+    Ok(())
+}
+
+const AN_1P25G_CHIPA: [(u8, u8, u16); 17] = [
+    (0x21, 0x10, 0x6480),
+    (0x21, 0x13, 0x0400),
+    (0x21, 0x18, 0x6d02),
+    (0x21, 0x1b, 0x424e),
+    (0x21, 0x1d, 0x0002),
+    (0x36, 0x1c, 0x1390),
+    (0x36, 0x14, 0x003F),
+    (0x36, 0x10, 0x0300),
+    (0x24, 0x04, 0x0080),
+    (0x24, 0x7, 0x1201),
+    (0x24, 0x09, 0x0601),
+    (0x24, 0x0b, 0x232c),
+    (0x24, 0x0c, 0x9217),
+    (0x24, 0x0f, 0x5B50),
+    (0x24, 0x15, 0xe7c1),
+    (0x24, 0x16, 0x0443),
+    (0x24, 0x1d, 0xabb0),
+];
+
+const DIG_PATCH_MAC: [(u8, u8, u16); 8] = [
+    (6, 18, 0x5078),
+    (7, 6, 0x9401),
+    (7, 8, 0x9401),
+    (7, 10, 0x9401),
+    (7, 12, 0x9401),
+    (31, 11, 0x0003),
+    (6, 3, 0xc45c),
+    (6, 31, 0x2100),
+];
+
+const DIG_PATCH_PHY: [(u8, u8, u16); 4] = [
+    (6, 18, 0x5078),
+    (6, 3, 0xc45c),
+    (6, 30, 0x000C),
+    (6, 31, 0x2100),
+];
+
+fn fw_reset_flow_tgx<'bus, I2C: I2c>(
+    dev: &mut Rtl837x<'bus, I2C>,
+    sds: u8,
+) -> Result<(), Error<I2C::Error>> {
+    let val = dev.sds_reg_read(sds, 0x20, 0)?;
+    if (val >> 4) & 0x03 != 0x01 {
+        let val = dev.sds_reg_read(sds, 1, 0x1d)?;
+        let sig_ok = (val >> 8) & 1 == 1;
+        let sync_ok = val & 1 == 1;
+        let link_ok = (val >> 4) & 1 == 1;
+        println!("SIG {sig_ok}, Sync {sync_ok}, Link {link_ok}");
+        if sig_ok {
+            let val = dev.sds_reg_read(sds, 0, 0)? & !(1 << 1);
+            if sync_ok || !link_ok {
+                dev.sds_reg_write(sds, 0, 0, val | 0x02)?;
+                dev.sds_reg_write(sds, 0, 0, val)?;
+                dev.sds_reg_write(sds, 0, 0, val | 0x02)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn __ffs(val: u32) -> u32 {
+    val.trailing_zeros()
+}
+
+fn sds_nway_set<'bus, I2C: I2c>(
+    dev: &mut Rtl837x<'bus, I2C>,
+    sds: u8,
+    an_en: bool,
+) -> Result<(), Error<I2C::Error>> {
+    // dal_rtl8373_sds_regbits_write(SDS_INDX, 0, 2, 0x3<<8, 0x3);
+    // dal_rtl8373_sds_regbits_write(SDS_INDX, 0, 4, 0x1<<2, 0x1);
+
+    let mut val = dev.sds_reg_read(sds, 0, 2)?;
+    val &= !(0x3 << 8);
+    if an_en {
+        val |= 0x3 << 8;
+    } else {
+        val |= 0x1 << 8;
+    }
+    dev.sds_reg_write(sds, 0, 2, val)?;
+
+    let mut val = dev.sds_reg_read(sds, 0, 4)?;
+    val &= !(1 << 2);
+    val |= 1 << 2;
+    dev.sds_reg_write(sds, 0, 4, val)
+}
+
+const SDS_PAGE_FRC: u8 = 0x20;
+const SDS_REG_FRC: u8 = 0x00;
+
+const SDS_FRC_RX_EN_VAL_MASK: u16 = 1 << 5;
+const SDS_FRC_RX_EN_ON_MASK: u16 = 1 << 4;
+
+fn serdes_off<'bus, I2C: I2c>(
+    rtldev: &mut Rtl837x<'bus, I2C>,
+    sds: u8,
+) -> Result<(), Error<I2C::Error>> {
+    rtldev.sds_reg_modify(sds, SDS_PAGE_FRC, SDS_REG_FRC, 3 << 4, 3 << 4)?;
+    sleep(Duration::from_millis(20));
+    rtldev.sds_reg_modify(sds, SDS_PAGE_FRC, SDS_REG_FRC, 3 << 4, 1 << 4)?;
+    sleep(Duration::from_millis(50));
+
+    rtldev.sds_reg_modify(sds, SDS_PAGE_FRC, SDS_REG_FRC, 3 << 6, 1 << 6)?;
+    sleep(Duration::from_millis(20));
+    rtldev.sds_reg_modify(sds, SDS_PAGE_FRC, SDS_REG_FRC, 3 << 6, 3 << 6)?;
+    sleep(Duration::from_millis(50));
+
+    rtldev.sds_reg_modify(sds, SDS_PAGE_FRC, SDS_REG_FRC, 3 << 10, 3 << 10)?;
+    sleep(Duration::from_millis(20));
+    rtldev.sds_reg_modify(sds, SDS_PAGE_FRC, SDS_REG_FRC, 3 << 10, 1 << 10)?;
+    sleep(Duration::from_millis(50));
+
+    Ok(())
+}
+
+fn serdes_on<'bus, I2C: I2c>(
+    rtldev: &mut Rtl837x<'bus, I2C>,
+    sds: u8,
+) -> Result<(), Error<I2C::Error>> {
+    rtldev.sds_reg_modify(sds, SDS_PAGE_FRC, SDS_REG_FRC, 3 << 10, 1 << 10)?;
+    sleep(Duration::from_millis(20));
+    rtldev.sds_reg_modify(sds, SDS_PAGE_FRC, SDS_REG_FRC, 3 << 10, 3 << 10)?;
+    sleep(Duration::from_millis(50));
+    rtldev.sds_reg_modify(sds, SDS_PAGE_FRC, SDS_REG_FRC, 3 << 10, 0 << 10)?;
+    sleep(Duration::from_millis(20));
+
+    rtldev.sds_reg_modify(sds, SDS_PAGE_FRC, SDS_REG_FRC, 3 << 6, 3 << 6)?;
+    sleep(Duration::from_millis(20));
+    rtldev.sds_reg_modify(sds, SDS_PAGE_FRC, SDS_REG_FRC, 3 << 6, 1 << 6)?;
+    sleep(Duration::from_millis(50));
+    rtldev.sds_reg_modify(sds, SDS_PAGE_FRC, SDS_REG_FRC, 3 << 6, 0 << 6)?;
+    sleep(Duration::from_millis(20));
+
+    rtldev.sds_reg_modify(
+        sds,
+        SDS_PAGE_FRC,
+        SDS_REG_FRC,
+        SDS_FRC_RX_EN_VAL_MASK | SDS_FRC_RX_EN_ON_MASK,
+        3 << 4,
+    )?;
+    sleep(Duration::from_millis(20));
+    rtldev.sds_reg_modify(
+        sds,
+        SDS_PAGE_FRC,
+        SDS_REG_FRC,
+        SDS_FRC_RX_EN_VAL_MASK | SDS_FRC_RX_EN_ON_MASK,
+        1 << 4,
+    )?;
+    sleep(Duration::from_millis(50));
+    rtldev.sds_reg_modify(
+        sds,
+        SDS_PAGE_FRC,
+        SDS_REG_FRC,
+        SDS_FRC_RX_EN_VAL_MASK | SDS_FRC_RX_EN_ON_MASK,
+        0 << 4,
+    )?;
+    sleep(Duration::from_millis(50));
+
+    Ok(())
+}
+
+const RTL8373_SDS_MODE_SEL_CFG_MAC8_8221B_OFFSET: u32 = 22;
+const RTL8373_SDS_MODE_SEL_CFG_MAC8_8221B_MASK: u32 =
+    0x1 << RTL8373_SDS_MODE_SEL_CFG_MAC8_8221B_OFFSET;
+const RTL8373_SDS_MODE_SEL_CFG_MAC3_8221B_OFFSET: u32 = 21;
+const RTL8373_SDS_MODE_SEL_CFG_MAC3_8221B_MASK: u32 =
+    0x1 << RTL8373_SDS_MODE_SEL_CFG_MAC3_8221B_OFFSET;
+const RTL8373_SDS_MODE_SEL_SDS1_USX_SUB_MODE_OFFSET: u32 = 16;
+const RTL8373_SDS_MODE_SEL_SDS1_USX_SUB_MODE_MASK: u32 =
+    0x1F << RTL8373_SDS_MODE_SEL_SDS1_USX_SUB_MODE_OFFSET;
+const RTL8373_SDS_MODE_SEL_SDS0_USX_SUB_MODE_OFFSET: u32 = 10;
+const RTL8373_SDS_MODE_SEL_SDS0_USX_SUB_MODE_MASK: u32 =
+    0x1F << RTL8373_SDS_MODE_SEL_SDS0_USX_SUB_MODE_OFFSET;
+const RTL8373_SDS_MODE_SEL_SDS1_MODE_SEL_OFFSET: u32 = 5;
+const RTL8373_SDS_MODE_SEL_SDS1_MODE_SEL_MASK: u32 =
+    0x1F << RTL8373_SDS_MODE_SEL_SDS1_MODE_SEL_OFFSET;
+const RTL8373_SDS_MODE_SEL_SDS0_MODE_SEL_OFFSET: u32 = 0;
+const RTL8373_SDS_MODE_SEL_SDS0_MODE_SEL_MASK: u32 =
+    0x1F << RTL8373_SDS_MODE_SEL_SDS0_MODE_SEL_OFFSET;
+
+#[derive(Debug, Clone, Copy)]
+pub enum PhyInterfaceT {
+    PHY_INTERFACE_MODE_USXGMII = 0x0d,
+    PHY_INTERFACE_MODE_10GBASER = 0x1a,
+    PHY_INTERFACE_MODE_2500BASEX = 0x16,
+    PHY_INTERFACE_MODE_1000BASEX = 0x02,
+    PHY_INTERFACE_MODE_SGMII = 0x04,
+    PHY_INTERFACE_MODE_100BASEX = 0x05,
+}
+
+const SDS_PAGE_CTRL00: u8 = 0x00;
+const SDS_REG_CTRL00_REG00: u8 = 0x00;
+const SDS_REG_CTRL00_REG02: u8 = 0x02;
+const SDS_REG_CTRL00_REG04: u8 = 0x04;
+
+const SDS_PAGE_CTRL01: u8 = 0x01;
+const SDS_REG_CTRL01_XSG_STS: u8 = 0x02;
+
+const SDS_CTRL01_XSG_STS_SIG_OK: u16 = 1 << 8;
+const SDS_CTRL01_XSG_STS_LINK_OK: u16 = 1 << 4;
+const SDS_CTRL01_XSG_STS_SYNC_OK: u16 = 1 << 0;
+
+fn sds_reset_x<'bus, I2C: I2c>(
+    dev: &mut Rtl837x<'bus, I2C>,
+    sds: u8,
+) -> Result<(), Error<I2C::Error>> {
+    let val = dev.sds_reg_read(sds, SDS_PAGE_FRC, SDS_REG_FRC)?;
+
+    if (val & (SDS_FRC_RX_EN_ON_MASK | SDS_FRC_RX_EN_VAL_MASK)) >> 4 != 0x01 {
+        let val = dev.sds_reg_read(sds, SDS_PAGE_CTRL01, SDS_REG_CTRL01_XSG_STS)?;
+        let sig_ok = (val & SDS_CTRL01_XSG_STS_SIG_OK) != 0;
+        let sync_ok = (val & SDS_CTRL01_XSG_STS_SYNC_OK) != 0;
+        let link_ok = (val & SDS_CTRL01_XSG_STS_LINK_OK) != 0;
+        println!("SIG {sig_ok}, Sync {sync_ok}, Link {link_ok}");
+        if sig_ok {
+            let bit = 1 << 1;
+            let val = dev.sds_reg_read(sds, SDS_PAGE_CTRL00, SDS_REG_CTRL00_REG00)? & !(bit);
+            if sync_ok || !link_ok {
+                println!("Reseting SDS");
+                dev.sds_reg_write(sds, SDS_PAGE_CTRL00, SDS_REG_CTRL00_REG00, val | bit)?;
+                sleep(Duration::from_millis(20));
+                dev.sds_reg_write(sds, SDS_PAGE_CTRL00, SDS_REG_CTRL00_REG00, val)?;
+                sleep(Duration::from_millis(20));
+                dev.sds_reg_write(sds, SDS_PAGE_CTRL00, SDS_REG_CTRL00_REG00, val | bit)?;
+                sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn serdes_an_patch<'bus, I2C: I2c>(
+    dev: &mut Rtl837x<'bus, I2C>,
+    sds: u8,
+    interface: PhyInterfaceT,
+) -> Result<(), Error<I2C::Error>> {
+    println!("serdes_an_patch");
+    let mut patch: Option<&[(u8, u8, u16)]> = None;
+    match interface {
+        PhyInterfaceT::PHY_INTERFACE_MODE_USXGMII => todo!(),
+        PhyInterfaceT::PHY_INTERFACE_MODE_10GBASER => todo!(),
+        PhyInterfaceT::PHY_INTERFACE_MODE_2500BASEX => todo!(),
+        PhyInterfaceT::PHY_INTERFACE_MODE_1000BASEX | PhyInterfaceT::PHY_INTERFACE_MODE_SGMII => {
+            patch = Some(&DIG_PATCH_MAC);
+        }
+        PhyInterfaceT::PHY_INTERFACE_MODE_100BASEX => todo!(),
+    }
+
+    if let Some(patch) = patch {
+        for (sds_page, sds_reg, sds_value) in patch {
+            dev.sds_reg_write(sds, *sds_page, *sds_reg, *sds_value)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn serdes_mac_patch<'bus, I2C: I2c>(
+    dev: &mut Rtl837x<'bus, I2C>,
+    sds: u8,
+) -> Result<(), Error<I2C::Error>> {
+    println!("Patch MAC");
+    for (sds_page, sds_reg, sds_value) in DIG_PATCH_MAC {
+        dev.sds_reg_write(sds, sds_page, sds_reg, sds_value)?;
+    }
+    Ok(())
+}
+
+const SDS_PAGE_CTRL02: u8 = 0x02;
+const SDS_REG_CTRL02_XSG_AN: u8 = 0x04;
+
+fn sds_pcs_config<'bus, I2C: I2c>(
+    dev: &mut Rtl837x<'bus, I2C>,
+    sds: u8,
+    interface: PhyInterfaceT,
+    en_inband: bool,
+    permit_pause_to_mac: bool,
+) -> Result<(), Error<I2C::Error>> {
+    println!("Change SDS {sds} to {interface:?}");
+
+    let mask = if sds == 0 {
+        RTL8373_SDS_MODE_SEL_CFG_MAC3_8221B_MASK
+    } else {
+        RTL8373_SDS_MODE_SEL_CFG_MAC8_8221B_MASK
+    };
+    dev.modify_reg(Regs::SdsModeSel.into(), mask, 0)?;
+
+    serdes_off(dev, sds)?;
+
+    let mask = if sds == 0 {
+        RTL8373_SDS_MODE_SEL_SDS0_USX_SUB_MODE_MASK
+    } else {
+        RTL8373_SDS_MODE_SEL_SDS1_USX_SUB_MODE_MASK
+    };
+    dev.modify_reg(Regs::SdsModeSel.into(), mask, 0)?;
+
+    let mask = if sds == 0 {
+        RTL8373_SDS_MODE_SEL_SDS0_MODE_SEL_MASK
+    } else {
+        RTL8373_SDS_MODE_SEL_SDS1_MODE_SEL_MASK
+    };
+    let mut value = interface as u32;
+    if sds == 1 {
+        value <<= 5;
+    }
+    dev.modify_reg(Regs::SdsModeSel.into(), mask, value)?;
+
+    // apply patch
+    serdes_an_patch(dev, sds, interface)?;
+    serdes_mac_patch(dev, sds)?;
+
+    sleep(Duration::from_millis(250));
+
+    // Set Auto Negotiation Pause/AsymPause
+    match interface {
+        PhyInterfaceT::PHY_INTERFACE_MODE_10GBASER | PhyInterfaceT::PHY_INTERFACE_MODE_100BASEX => {
+            todo!()
+        }
+        PhyInterfaceT::PHY_INTERFACE_MODE_2500BASEX
+        | PhyInterfaceT::PHY_INTERFACE_MODE_1000BASEX => {
+            dev.sds_reg_modify(sds, 0x1F, 5, 1 << 2, 1 << 2)?;
+            dev.sds_reg_modify(sds, 0x1F, 5, 1 << 3, 0)?;
+            dev.sds_reg_modify(sds, SDS_PAGE_CTRL02, SDS_REG_CTRL02_XSG_AN, 3, 3)?;
+        }
+        _ => (),
+    }
+
+    // Auto Negotiation
+    match interface {
+        PhyInterfaceT::PHY_INTERFACE_MODE_SGMII
+        | PhyInterfaceT::PHY_INTERFACE_MODE_1000BASEX
+        | PhyInterfaceT::PHY_INTERFACE_MODE_2500BASEX => {
+            dev.sds_reg_modify(
+                sds,
+                SDS_PAGE_CTRL00,
+                SDS_REG_CTRL00_REG02,
+                3 << 8,
+                if en_inband { 3 } else { 1 } << 8,
+            )?;
+
+            /* set SP_CFG_EN_LINK_FIB1G for enable fiberNwayForceLink */
+            dev.sds_reg_modify(sds, SDS_PAGE_CTRL00, SDS_REG_CTRL00_REG04, 1 << 2, 1 << 2)?;
+        }
+        PhyInterfaceT::PHY_INTERFACE_MODE_USXGMII
+        | PhyInterfaceT::PHY_INTERFACE_MODE_10GBASER
+        | PhyInterfaceT::PHY_INTERFACE_MODE_100BASEX => {
+            todo!()
+        }
+    }
+
+    serdes_on(dev, sds)?;
+
+    dev.sds_reg_modify(sds, 0x1f, 0x00, 0xFFFF, 0xb)?;
+
+    sleep(Duration::from_millis(50));
+
+    dev.sds_reg_modify(sds, 0x1f, 0x00, 0xFFFF, 0x0)?;
+
+    sleep(Duration::from_millis(50));
+
+    match interface {
+        PhyInterfaceT::PHY_INTERFACE_MODE_USXGMII | PhyInterfaceT::PHY_INTERFACE_MODE_10GBASER => {
+            todo!()
+        }
+        PhyInterfaceT::PHY_INTERFACE_MODE_2500BASEX
+        | PhyInterfaceT::PHY_INTERFACE_MODE_1000BASEX
+        | PhyInterfaceT::PHY_INTERFACE_MODE_SGMII
+        | PhyInterfaceT::PHY_INTERFACE_MODE_100BASEX => sds_reset_x(dev, sds)?,
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = "/dev/i2c-7";
     let mut bus = match linux_embedded_hal::I2cdev::new(path) {
@@ -146,22 +561,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let mut rtldev = rtl837x::Rtl837x::new(&mut bus, SLAVE_ADDR);
+    let mut rtldev = Rtl837x::new(&mut bus, SLAVE_ADDR);
 
     let soc = rtldev.get_chip_id()?;
     println!("SOC: {soc:?}");
 
     let soc = rtldev.get_soc_version()?;
     println!("SOC_REVISION: {soc:03x}");
-    let soc = rtldev.get_soc_version()?;
-    println!("SOC_REVISION: {soc:03x}");
 
     let mut data = [0; 16];
 
-    for reg in (0..128).into_iter().step_by(16) {
+    for reg in (0..96).into_iter().step_by(16) {
         rtldev.i2c_read(
             I2C_SCL::GPIO40_SCL3_MDC1,
-            I2C_SDA::GPIO39_SDA4,
+            I2C_SDA::GPIO41_SDA3_MDIO1,
             0x50,
             rtl837x::Addr::One(reg),
             &mut data,
@@ -184,6 +597,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    let r = [0x11ff, 0x01ff, 0x01ff, 0x0cc2, 0x0c01];
+
+    let mut cnt = 0;
+
+    for reg in 2..4 {
+        let val = phy_read(&mut rtldev, reg)?;
+
+        println!("Reg: {reg:02x} = {:04x}", val);
+        if r[usize::from(reg)] != val {
+            eprintln!("Error!");
+            break;
+        }
+        if cnt % 25 == 0 {
+            println!("Cnt {cnt}");
+        }
+        cnt += 1;
+    }
+
+    // https://elixir.bootlin.com/linux/v7.2.9/source/drivers/net/phy/marvell.c#L3749
+
+    let sds_val = rtldev.read_reg(0x7b20)?;
+    let sds0 = sds_val & 0x1f;
+    let sds1 = (sds_val >> 5) & 0x1f;
+    println!("SDS0 {sds0:1x} SDS1 {sds1:1x}");
+    if sds1 == 0x02 {
+        println!("Change SDS1 tp 1000 BASEx");
+    }
+
+    sds_pcs_config(
+        &mut rtldev,
+        0,
+        PhyInterfaceT::PHY_INTERFACE_MODE_SGMII,
+        true,
+        false,
+    )?;
+
+    // return Ok(());
+
+    // Set copper Page
+    let reg = MII_MARVELL_PHY_PAGE;
+    phy_write(&mut rtldev, reg, 0x00)?;
+    let val = phy_read(&mut rtldev, reg)?;
+    println!("Reg: {reg:02x} = {:04x}", val);
+
+    // Ext
+    let reg = 0x1b;
+    phy_modify(&mut rtldev, reg, 1 << 12, 0)?;
+
+    marvell_config_aneg(&mut rtldev)?;
+
+    // Set fiber Page
+    let reg = MII_MARVELL_PHY_PAGE;
+    phy_write(&mut rtldev, reg, 0x01)?;
+    let val = phy_read(&mut rtldev, reg)?;
+    println!("Reg: {reg:02x} = {:04x}", val);
+
+    genphy_restart_aneg(&mut rtldev)?;
+
+    // Set copper Page
+    let reg = MII_MARVELL_PHY_PAGE;
+    phy_write(&mut rtldev, reg, 0x00)?;
+    let val = phy_read(&mut rtldev, reg)?;
+    println!("Reg: {reg:02x} = {:04x}", val);
 
     return Ok(());
     // let regs = [Reg::new("MAC_LINK_STS", 0x63e8)];

@@ -1172,6 +1172,7 @@ name = "rtl837x-cli"
 version = "0.3.0"
 dependencies = [
  "crossterm",
+ "embedded-hal",
  "linux-embedded-hal",
  "ratatui",
  "rtl837x",
