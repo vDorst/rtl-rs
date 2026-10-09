@@ -1,5 +1,7 @@
+#![allow(dead_code, unused_imports)]
 const SLAVE_ADDR: u8 = 0x5c;
-use std::{thread::sleep, time::Duration};
+use std::{io::ErrorKind, thread::sleep, time::Duration};
+use udev::Enumerator;
 
 use embedded_hal::i2c::I2c;
 use rtl837x::{Error, I2C_SCL, I2C_SDA, Regs, Rtl837x, phy_modify, phy_read, phy_write};
@@ -164,10 +166,10 @@ fn genphy_restart_aneg<'bus, I2C: I2c>(
     let reg = 0x00;
     phy_write(dev, reg, 0x00)?;
     let mut val = phy_read(dev, reg)?;
-    println!("Reg: {reg:02x} = {:04x}", val);
+    println!("RESTART: Reg: {reg:02x} = {:04x}", val);
     if (val & BMCR_ANENABLE) == 0 {
         val &= !BMCR_ISOLATE;
-        val |= BMCR_ANRESTART | BMCR_ANENABLE;
+        val |= 0x8000 | BMCR_ANRESTART | BMCR_ANENABLE;
         println!("Write {val:04x}");
         phy_write(dev, reg, val)?;
     }
@@ -362,8 +364,8 @@ pub enum PhyInterfaceT {
     PHY_INTERFACE_MODE_USXGMII = 0x0d,
     PHY_INTERFACE_MODE_10GBASER = 0x1a,
     PHY_INTERFACE_MODE_2500BASEX = 0x16,
-    PHY_INTERFACE_MODE_1000BASEX = 0x02,
-    PHY_INTERFACE_MODE_SGMII = 0x04,
+    PHY_INTERFACE_MODE_1000BASEX = 0x04,
+    PHY_INTERFACE_MODE_SGMII = 0x02,
     PHY_INTERFACE_MODE_100BASEX = 0x05,
 }
 
@@ -552,11 +554,51 @@ fn sds_pcs_config<'bus, I2C: I2c>(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let path = "/dev/i2c-7";
-    let mut bus = match linux_embedded_hal::I2cdev::new(path) {
+    // let device = list_devices()
+    //     .wait()?
+    //     .find(|dev| dev.vendor_id() == 0x0403 && dev.product_id() == 0xc631)
+    //     .ok_or(std::io::Error::new(ErrorKind::NotFound, "device not found"))?;
+
+    // let path = device.sysfs_path();
+    // println!("path: {:?}", path);
+
+    let wanted_vid = "0403"; // lowercase hex, 4 digits
+    let wanted_pid = "c631";
+
+    let mut enumerator = Enumerator::new()?;
+    enumerator.match_subsystem("i2c-dev")?;
+
+    let mut dev_path = String::with_capacity(16);
+
+    for dev in enumerator.scan_devices()? {
+        // Usually something like "i2c-7"
+        let Some(adapter_name) = dev.sysname().to_str() else {
+            continue;
+        };
+
+        // Walk up the sysfs parent chain looking for the USB device.
+        let mut parent = dev.parent();
+        while let Some(p) = parent {
+            let vid = p.attribute_value("idVendor").and_then(|v| v.to_str());
+            let pid = p.attribute_value("idProduct").and_then(|v| v.to_str());
+
+            if vid == Some(wanted_vid) && pid == Some(wanted_pid) {
+                dev_path = format!("/dev/{adapter_name}");
+                break;
+            }
+
+            parent = p.parent();
+        }
+    }
+    if dev_path.is_empty() {
+        return Err(std::io::Error::new(ErrorKind::NotFound, "device not found").into());
+    }
+
+    println!("Try to open: {dev_path}");
+    let mut bus = match linux_embedded_hal::I2cdev::new(&dev_path) {
         Ok(bus) => bus,
         Err(e) => {
-            println!("Error opening I2C Bus {} {:?}", path, e);
+            println!("Error opening I2C Bus {:?} {:?}", dev_path, e);
             return Err(e.into());
         }
     };
@@ -625,34 +667,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Change SDS1 tp 1000 BASEx");
     }
 
-    sds_pcs_config(
-        &mut rtldev,
-        0,
-        PhyInterfaceT::PHY_INTERFACE_MODE_SGMII,
-        true,
-        false,
-    )?;
+    // sds_pcs_config(
+    //     &mut rtldev,
+    //     0,
+    //     PhyInterfaceT::PHY_INTERFACE_MODE_SGMII,
+    //     true,
+    //     false,
+    // )?;
 
     // return Ok(());
 
     // Set copper Page
     let reg = MII_MARVELL_PHY_PAGE;
     phy_write(&mut rtldev, reg, 0x00)?;
-    let val = phy_read(&mut rtldev, reg)?;
-    println!("Reg: {reg:02x} = {:04x}", val);
 
-    // Ext
+    let reg = 4;
+    phy_modify(&mut rtldev, reg, 0, 1 << 5 | 1 << 6 | 1 << 7 | 1 << 8)?;
+    //println!("[{reg:02}] = {val:04x}");
+
+    // Ext, set mode SGMII.
     let reg = 0x1b;
-    phy_modify(&mut rtldev, reg, 1 << 12, 0)?;
+    phy_modify(&mut rtldev, reg, 1 << 15 | 1 << 12 | 0xF, 1 << 15 | 0b100)?;
+    let val = phy_read(&mut rtldev, reg)?;
+    println!("[{reg:02}] = {val:04x}");
 
+    // genphy_soft_reset(&mut rtldev)?;
     marvell_config_aneg(&mut rtldev)?;
 
     // Set fiber Page
     let reg = MII_MARVELL_PHY_PAGE;
     phy_write(&mut rtldev, reg, 0x01)?;
-    let val = phy_read(&mut rtldev, reg)?;
-    println!("Reg: {reg:02x} = {:04x}", val);
 
+    // genphy_soft_reset(&mut rtldev)?;
     genphy_restart_aneg(&mut rtldev)?;
 
     // Set copper Page

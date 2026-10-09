@@ -13,3 +13,4 @@ ratatui = "0.30.0"
 serde_json = { version = "1.0.151" }
 serde = { version = "1.0.229", features = ["derive"] }
 crossterm = "0.29.0"
+udev = "0.9.3"
