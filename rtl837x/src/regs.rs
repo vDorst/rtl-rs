@@ -17,6 +17,7 @@ pub enum Regs {
     SdsIndacsRd = 0x3FC,
     SdsIndacsWd = 0x400,
 
+    I2cSlaveCtrl = 0x404,
     I2cMasterCtrl = 0x414,
     I2cMst1Ctrl1 = 0x418,
     I2cMst1Ctrl2 = 0x41c,
@@ -41,6 +42,9 @@ pub enum Regs {
     LedGlbMux6 = 0x65f4,
 
     MacLinkStatus = 0x63e8,
+
+    Dw8051CfgAddr = 0x6040,
+    Dw8051IromAddr = 0x80B0,
 
     #[cfg(test)]
     TestReg = 0xABCD,

@@ -3,7 +3,7 @@ mod regs;
 
 use embedded_hal::i2c::I2c;
 
-pub use crate::i2c::{I2C_SCL, I2C_SDA, phy_modify, phy_read, phy_write};
+pub use crate::i2c::{I2C_SCL, I2C_SDA, phy_modify, phy_read, phy_read_c45, phy_write};
 pub use crate::regs::Regs;
 
 #[derive(thiserror::Error, Debug)]
@@ -34,11 +34,18 @@ where
 pub struct Rtl837x<'bus, I> {
     i2c: &'bus mut I,
     addr: u8,
+    scl: I2C_SCL,
+    sda: I2C_SDA,
 }
 
 impl<'bus, I2C: I2c> Rtl837x<'bus, I2C> {
-    pub fn new(i2cbus: &'bus mut I2C, addr: u8) -> Self {
-        Self { i2c: i2cbus, addr }
+    pub fn new(i2cbus: &'bus mut I2C, addr: u8, scl: I2C_SCL, sda: I2C_SDA) -> Self {
+        Self {
+            i2c: i2cbus,
+            addr,
+            scl,
+            sda,
+        }
     }
 
     pub fn read_reg(&mut self, reg: u16) -> Result<u32, I2C::Error> {
@@ -401,8 +408,6 @@ impl<'bus, I2C: I2c> Rtl837x<'bus, I2C> {
 
     pub fn i2c_read(
         &mut self,
-        scl: I2C_SCL,
-        sda: I2C_SDA,
         dev: u8,
         addr: Addr,
         data: &mut [u8],
@@ -444,8 +449,8 @@ impl<'bus, I2C: I2c> Rtl837x<'bus, I2C> {
 
         let mut val = addr_len;
         val |= len << 16;
-        val |= scl as u32;
-        val |= sda as u32;
+        val |= self.scl as u32;
+        val |= self.sda as u32;
         val |= u32::from(dev) << 3;
         val |= 0x1;
         // println!("data: {val:08x}");
@@ -484,14 +489,7 @@ impl<'bus, I2C: I2c> Rtl837x<'bus, I2C> {
         Ok(())
     }
 
-    pub fn i2c_write(
-        &mut self,
-        scl: I2C_SCL,
-        sda: I2C_SDA,
-        dev: u8,
-        addr: Addr,
-        data: &[u8],
-    ) -> Result<(), Error<I2C::Error>> {
+    pub fn i2c_write(&mut self, dev: u8, addr: Addr, data: &[u8]) -> Result<(), Error<I2C::Error>> {
         let (addr_data, addr_len) = match addr {
             Addr::None => (0x0, 0 << 20),
             Addr::One(v) => (u32::from(v), 1 << 20),
@@ -542,8 +540,8 @@ impl<'bus, I2C: I2c> Rtl837x<'bus, I2C> {
 
         let mut val = addr_len;
         val |= len << 16;
-        val |= scl as u32;
-        val |= sda as u32;
+        val |= self.scl as u32;
+        val |= self.sda as u32;
         val |= u32::from(dev) << 3;
         val |= 0x4 | 0x1;
         // println!("data: {val:08x}");
@@ -826,7 +824,12 @@ mod tests {
 
         let mut i2cbus_mock = I2cMock::new(&expect);
 
-        let mut rtl = Rtl837x::new(&mut i2cbus_mock, 0x5c);
+        let mut rtl = Rtl837x::new(
+            &mut i2cbus_mock,
+            0x5c,
+            I2C_SCL::GPIO46_SCL0,
+            I2C_SDA::GPIO47_SDA0,
+        );
 
         let val = rtl.read_reg(Regs::TestReg.into());
         assert_eq!(val, Ok(0x12345678));

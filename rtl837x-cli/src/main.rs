@@ -4,7 +4,9 @@ use std::{io::ErrorKind, thread::sleep, time::Duration};
 use udev::Enumerator;
 
 use embedded_hal::i2c::I2c;
-use rtl837x::{Error, I2C_SCL, I2C_SDA, Regs, Rtl837x, phy_modify, phy_read, phy_write};
+use rtl837x::{
+    Error, I2C_SCL, I2C_SDA, Regs, Rtl837x, phy_modify, phy_read, phy_read_c45, phy_write,
+};
 
 use crossterm::{
     event::{
@@ -422,10 +424,10 @@ fn serdes_an_patch<'bus, I2C: I2c>(
         PhyInterfaceT::PHY_INTERFACE_MODE_USXGMII => todo!(),
         PhyInterfaceT::PHY_INTERFACE_MODE_10GBASER => todo!(),
         PhyInterfaceT::PHY_INTERFACE_MODE_2500BASEX => todo!(),
+        PhyInterfaceT::PHY_INTERFACE_MODE_100BASEX => todo!(),
         PhyInterfaceT::PHY_INTERFACE_MODE_1000BASEX | PhyInterfaceT::PHY_INTERFACE_MODE_SGMII => {
             patch = Some(&DIG_PATCH_MAC);
         }
-        PhyInterfaceT::PHY_INTERFACE_MODE_100BASEX => todo!(),
     }
 
     if let Some(patch) = patch {
@@ -553,6 +555,49 @@ fn sds_pcs_config<'bus, I2C: I2c>(
     Ok(())
 }
 
+/// IROM is just the first 4k of the SPI flash.
+fn dump_irom<'bus, I2C: I2c>(rtldev: &mut Rtl837x<'bus, I2C>) -> Result<(), Error<I2C::Error>> {
+    rtldev.modify_reg(0x24, 1 << 11, 1 << 11)?;
+    rtldev.modify_reg(Regs::Dw8051CfgAddr.into(), 2, 2)?;
+    // println!("{val:08x}");
+
+    let mut ascii = String::new();
+    for reg in 0..0x4000 {
+        if (reg & 0xFFF) == 0 {
+            rtldev.modify_reg(
+                Regs::Dw8051CfgAddr.into(),
+                3 << 2,
+                u32::from(((reg >> 12) & 0x03) << 2),
+            )?;
+        }
+        let val = rtldev.read_reg((4_u16 * (reg & 0xFFF)) + Regs::Dw8051IromAddr as u16)?;
+
+        if reg % 16 == 0 {
+            print!("{reg:04x}: ");
+        }
+
+        let b = val as u8;
+
+        print!("{b:02x} ");
+
+        let c: char = if !(0x20..=0x7F).contains(&b) {
+            '.'
+        } else {
+            char::from_u32(u32::from(b)).unwrap_or('.')
+        };
+        ascii.push(c);
+
+        if reg % 16 == 15 {
+            println!(" -- `{ascii}`");
+            ascii.clear();
+        }
+    }
+
+    Ok(())
+}
+
+// fn i2c_detect<'bus, I2C: I2c>(rtldev: &mut Rtl837x<'bus, I2C>) -> Result<(), Error<I2C::Error>> {}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // let device = list_devices()
     //     .wait()?
@@ -598,12 +643,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bus = match linux_embedded_hal::I2cdev::new(&dev_path) {
         Ok(bus) => bus,
         Err(e) => {
-            println!("Error opening I2C Bus {:?} {:?}", dev_path, e);
+            println!("Error opening I2C Bus {dev_path:?} {e:?}");
             return Err(e.into());
         }
     };
 
-    let mut rtldev = Rtl837x::new(&mut bus, SLAVE_ADDR);
+    let mut rtldev = Rtl837x::new(
+        &mut bus,
+        SLAVE_ADDR,
+        I2C_SCL::GPIO40_SCL3_MDC1,
+        I2C_SDA::GPIO39_SDA4,
+    );
 
     let soc = rtldev.get_chip_id()?;
     println!("SOC: {soc:?}");
@@ -611,16 +661,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let soc = rtldev.get_soc_version()?;
     println!("SOC_REVISION: {soc:03x}");
 
-    let mut data = [0; 16];
+    for reg in (0x404..=0x41c).into_iter().step_by(4) {
+        let val = rtldev.read_reg(reg)?;
+        println!("\tREG: [{reg:04x}] = {val:08x}");
+    }
 
+    // Value 3 breaks i2c reads
+    rtldev.modify_reg(Regs::I2cMasterCtrl.into(), 1 << 11, 0 << 11)?;
+    rtldev.modify_reg(Regs::I2cMst1Ctrl2.into(), 3, 0)?;
+
+    // I2C detect
+
+    let mut data = [0; 1];
+    for (idx, addr) in (7..127).enumerate() {
+        if idx % 16 == 0 {
+            println!();
+        }
+        match rtldev.i2c_read(addr, rtl837x::Addr::One(0x01), &mut data) {
+            Ok(val) => print!("{addr:02x} "),
+            Err(err) => print!("-- "),
+        }
+    }
+    println!();
+
+    // Dump i2c
+    let mut data = [0; 16];
     for reg in (0..96).into_iter().step_by(16) {
-        rtldev.i2c_read(
-            I2C_SCL::GPIO40_SCL3_MDC1,
-            I2C_SDA::GPIO41_SDA3_MDIO1,
-            0x50,
-            rtl837x::Addr::One(reg),
-            &mut data,
-        )?;
+        rtldev.i2c_read(0x50, rtl837x::Addr::One(reg), &mut data)?;
+        println!("Data: Reg {reg:04x} {data:02x?}");
 
         let mut ascii = String::new();
         for (idx, &b) in data.iter().enumerate() {
@@ -639,22 +707,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
     let r = [0x11ff, 0x01ff, 0x01ff, 0x0cc2, 0x0c01];
 
-    let mut cnt = 0;
+    // for val in 0..=3 {
+    //     println!("Set I2C CLK = {val}");
+    //     rtldev.modify_reg(Regs::I2cMst1Ctrl2.into(), 3, val)?;
+    //     match phy_read(&mut rtldev, 0x02) {
+    //         Ok(val) => println!("Works: Reg: 0x02 = {:04x}", val),
+    //         Err(err) => println!("\tDon't work {err:?}"),
+    //     }
+    // }
 
-    for reg in 2..4 {
+    println!("Phy detect");
+    for (cnt, devad) in (30..=31).enumerate() {
+        for reg in (0x02..=0x03) {
+            let val = phy_read_c45(&mut rtldev, devad, reg)?;
+
+            println!("C45 devad: {devad:02x}  reg: {reg:04x} = {:04x}", val);
+        }
+    }
+
+    for reg in (0x02..=0x03) {
         let val = phy_read(&mut rtldev, reg)?;
 
-        println!("Reg: {reg:02x} = {:04x}", val);
-        if r[usize::from(reg)] != val {
-            eprintln!("Error!");
-            break;
-        }
-        if cnt % 25 == 0 {
-            println!("Cnt {cnt}");
-        }
-        cnt += 1;
+        println!("C22 devad: reg: {reg:04x} = {:04x}", val);
     }
 
     // https://elixir.bootlin.com/linux/v7.2.9/source/drivers/net/phy/marvell.c#L3749
@@ -669,7 +746,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // sds_pcs_config(
     //     &mut rtldev,
-    //     0,
+    //     1,
     //     PhyInterfaceT::PHY_INTERFACE_MODE_SGMII,
     //     true,
     //     false,
